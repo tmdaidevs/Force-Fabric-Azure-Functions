@@ -1,0 +1,9 @@
+# Do not include azure-functions-worker in this file
+azure-functions
+azure-identity
+requests
+python-tds
+botbuilder-core
+botbuilder-integration-aiohttp
+azure-ai-projects
+fastmcp

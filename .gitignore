@@ -1,5 +1,7 @@
-node_modules/
-dist/
+__pycache__/
+.python_packages/
+.venv/
 local.settings.json
 .env
-*.js.map
+*.pyc
+.azure/

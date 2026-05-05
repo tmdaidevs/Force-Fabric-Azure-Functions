@@ -1,0 +1,8 @@
+name: force-fabric-mcp
+metadata:
+  template: force-fabric-mcp-azure-functions
+services:
+  api:
+    project: .
+    language: python
+    host: function
