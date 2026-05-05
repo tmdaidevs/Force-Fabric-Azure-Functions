@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -10,12 +11,44 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 # --- FastMCP ASGI adapter ---
 _asgi_app = mcp.http_app(path="/")
+_lifespan_started = False
+
+
+async def _ensure_lifespan():
+    """Start the ASGI lifespan once (initializes FastMCP task group)."""
+    global _lifespan_started
+    if _lifespan_started:
+        return
+
+    scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
+    startup_complete = asyncio.Event()
+    exception = None
+
+    async def receive():
+        return {"type": "lifespan.startup"}
+
+    async def send(message):
+        nonlocal exception
+        if message["type"] == "lifespan.startup.complete":
+            startup_complete.set()
+        elif message["type"] == "lifespan.startup.failed":
+            exception = message.get("message", "Startup failed")
+            startup_complete.set()
+
+    # Run lifespan in background — it stays alive for the process
+    asyncio.get_event_loop().create_task(_asgi_app(scope, receive, send))
+    await startup_complete.wait()
+
+    if exception:
+        raise RuntimeError(f"FastMCP lifespan startup failed: {exception}")
+    _lifespan_started = True
 
 
 async def _run_asgi(req: func.HttpRequest, route: str = "") -> func.HttpResponse:
     """Forward an Azure Functions request to the FastMCP ASGI app."""
-    import asyncio
     from io import BytesIO
+
+    await _ensure_lifespan()
 
     scope = {
         "type": "http",
