@@ -12,7 +12,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  PYTHON_VERSION: '3.11' # botbuilder-core requires <=3.12
+  PYTHON_VERSION: '3.13' # must match Flex Consumption runtime version
 
 jobs:
   build:
