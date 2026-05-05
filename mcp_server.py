@@ -3,7 +3,6 @@
 import inspect
 import logging
 import re
-from typing import Optional
 
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -69,30 +68,34 @@ def _build_tool_function(tool_def):
         else:
             params.append(inspect.Parameter(
                 name, inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=None, annotation=Optional[str]
+                default=None, annotation=str
             ))
 
-    def _execute(tool=tool_def, **kwargs) -> str:
+    sig = inspect.Signature(params, return_annotation=str)
+
+    def _execute(_tool=tool_def, **kwargs) -> str:
         try:
             _ensure_auth()
             require_auth()
             args = {k: v for k, v in kwargs.items() if v is not None}
             if "workspaceId" in args and not GUID_RE.match(str(args["workspaceId"])):
                 args["workspaceId"] = _resolve_workspace_id(str(args["workspaceId"]))
-            return tool["handler"](args)
+            return _tool["handler"](args)
         except Exception as e:
-            logging.error(f"Tool {tool['name']} error: {e}")
+            logging.error(f"Tool {_tool['name']} error: {e}")
             return f"Error: {str(e)}"
 
-    # Create wrapper with proper signature
-    sig = inspect.Signature(params, return_annotation=str)
+    if not param_names:
+        # No-parameter tool
+        def wrapper() -> str:
+            return _execute()
+    else:
+        def wrapper(*args, **kwargs) -> str:
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            return _execute(**bound.arguments)
+        wrapper.__signature__ = sig
 
-    def wrapper(*args, **kwargs):
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
-        return _execute(tool=tool_def, **bound.arguments)
-
-    wrapper.__signature__ = sig
     wrapper.__name__ = tool_def["name"]
     wrapper.__doc__ = tool_def["description"]
     return wrapper
