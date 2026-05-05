@@ -22,7 +22,7 @@ async def _run_asgi(req: func.HttpRequest, route: str = "") -> func.HttpResponse
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
         "method": req.method,
-        "path": f"/mcp/{route}",
+        "path": f"/{route}" if route else "/",
         "query_string": (req.url.split("?", 1)[1] if "?" in req.url else "").encode(),
         "headers": [(k.lower().encode(), v.encode()) for k, v in req.headers.items()],
         "root_path": "",
