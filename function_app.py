@@ -1,7 +1,6 @@
-import asyncio
+import json
 import logging
 import os
-import re
 
 import azure.functions as func
 
@@ -9,98 +8,73 @@ from mcp_server import mcp
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
-# --- FastMCP ASGI adapter ---
-_asgi_app = mcp.http_app(path="/")
-_lifespan_started = False
 
-
-async def _ensure_lifespan():
-    """Start the ASGI lifespan once (initializes FastMCP task group)."""
-    global _lifespan_started
-    if _lifespan_started:
-        return
-
-    scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
-    startup_complete = asyncio.Event()
-    exception = None
-
-    async def receive():
-        return {"type": "lifespan.startup"}
-
-    async def send(message):
-        nonlocal exception
-        if message["type"] == "lifespan.startup.complete":
-            startup_complete.set()
-        elif message["type"] == "lifespan.startup.failed":
-            exception = message.get("message", "Startup failed")
-            startup_complete.set()
-
-    # Run lifespan in background — it stays alive for the process
-    asyncio.get_event_loop().create_task(_asgi_app(scope, receive, send))
-    await startup_complete.wait()
-
-    if exception:
-        raise RuntimeError(f"FastMCP lifespan startup failed: {exception}")
-    _lifespan_started = True
-
-
-async def _run_asgi(req: func.HttpRequest, route: str = "") -> func.HttpResponse:
-    """Forward an Azure Functions request to the FastMCP ASGI app."""
-    from io import BytesIO
-
-    await _ensure_lifespan()
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": req.method,
-        "path": f"/{route}" if route else "/",
-        "query_string": (req.url.split("?", 1)[1] if "?" in req.url else "").encode(),
-        "headers": [(k.lower().encode(), v.encode()) for k, v in req.headers.items()],
-        "root_path": "",
-    }
-
-    body = req.get_body()
-    body_sent = False
-    response_started = False
-    status_code = 200
-    response_headers = []
-    response_body = BytesIO()
-
-    async def receive():
-        nonlocal body_sent
-        if not body_sent:
-            body_sent = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        # Keep connection alive for SSE
-        await asyncio.sleep(3600)
-        return {"type": "http.disconnect"}
-
-    async def send(message):
-        nonlocal response_started, status_code, response_headers
-        if message["type"] == "http.response.start":
-            response_started = True
-            status_code = message["status"]
-            response_headers = message.get("headers", [])
-        elif message["type"] == "http.response.body":
-            response_body.write(message.get("body", b""))
-
-    await _asgi_app(scope, receive, send)
-
-    headers = {k.decode(): v.decode() for k, v in response_headers}
-    return func.HttpResponse(
-        body=response_body.getvalue(),
-        status_code=status_code,
-        headers=headers,
-    )
-
-
-@app.route(route="mcp/{*route}", methods=["GET", "POST", "DELETE", "OPTIONS"])
+# --- MCP JSON-RPC handler (direct, no ASGI) ---
+@app.route(route="mcp", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 async def mcp_handler(req: func.HttpRequest) -> func.HttpResponse:
-    """Catch-all route forwarding to FastMCP."""
-    route = req.route_params.get("route", "")
-    return await _run_asgi(req, route)
+    """Handle MCP JSON-RPC requests directly via FastMCP."""
+    try:
+        body = req.get_json()
+        method = body.get("method", "")
+        params = body.get("params", {})
+        req_id = body.get("id")
+
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {
+                    "name": "Fabric Optimize MCP Server",
+                    "version": "1.0.0",
+                },
+            }
+        elif method == "tools/list":
+            tools = []
+            for tool in mcp._tool_manager.list_tools():
+                schema = (
+                    tool.parameters.model_json_schema()
+                    if tool.parameters
+                    else {"type": "object", "properties": {}}
+                )
+                tools.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": schema,
+                })
+            result = {"tools": tools}
+        elif method == "tools/call":
+            tool_name = params.get("name", "")
+            arguments = params.get("arguments", {})
+            tool_result = await mcp.call_tool(tool_name, arguments)
+            content = []
+            for item in tool_result:
+                text = item.text if hasattr(item, "text") else str(item)
+                content.append({"type": "text", "text": text})
+            result = {"content": content, "isError": False}
+        elif method == "ping":
+            result = {}
+        else:
+            return func.HttpResponse(
+                json.dumps({
+                    "jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32601, "message": f"Unknown method: {method}"},
+                }),
+                mimetype="application/json",
+            )
+
+        return func.HttpResponse(
+            json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}),
+            mimetype="application/json",
+        )
+    except Exception as e:
+        logging.error(f"MCP error: {e}", exc_info=True)
+        return func.HttpResponse(
+            json.dumps({
+                "jsonrpc": "2.0", "id": body.get("id") if "body" in dir() else None,
+                "error": {"code": -32603, "message": str(e)},
+            }),
+            mimetype="application/json",
+        )
 
 
 # --- Health endpoint ---
@@ -109,7 +83,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse('{"status":"ok"}', mimetype="application/json")
 
 
-# --- Teams Bot endpoint (lazy imports for compatibility) ---
+# --- Teams Bot endpoint (lazy imports for Python 3.13 compatibility) ---
 _bot_adapter = None
 _bot_instance = None
 
@@ -119,7 +93,6 @@ def _get_bot():
     if _bot_adapter is None:
         from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings
         from bot.teams_bot import FabricOptimizerBot
-
         _bot_adapter = BotFrameworkAdapter(BotFrameworkAdapterSettings(
             app_id=os.environ.get("MicrosoftAppId", ""),
             app_password=os.environ.get("MicrosoftAppPassword", ""),
@@ -132,10 +105,8 @@ def _get_bot():
 async def messages(req: func.HttpRequest) -> func.HttpResponse:
     """Teams bot messages endpoint."""
     from botbuilder.schema import Activity
-
     if "application/json" not in (req.headers.get("Content-Type") or ""):
         return func.HttpResponse(status_code=415)
-
     adapter, bot = _get_bot()
     body = req.get_json()
     activity = Activity().deserialize(body)
@@ -148,7 +119,7 @@ async def messages(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(status_code=200)
 
 
-# --- Daily scan timer trigger (lazy import to avoid startup failures) ---
+# --- Daily scan timer trigger ---
 try:
     from orchestration.daily_scan import register_daily_scan
     register_daily_scan(app)
