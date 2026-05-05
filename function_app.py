@@ -30,16 +30,11 @@ async def mcp_handler(req: func.HttpRequest) -> func.HttpResponse:
             }
         elif method == "tools/list":
             tools = []
-            for tool in mcp._tool_manager.list_tools():
-                schema = (
-                    tool.parameters.model_json_schema()
-                    if tool.parameters
-                    else {"type": "object", "properties": {}}
-                )
+            for tool in await mcp.list_tools():
                 tools.append({
                     "name": tool.name,
                     "description": tool.description or "",
-                    "inputSchema": schema,
+                    "inputSchema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
                 })
             result = {"tools": tools}
         elif method == "tools/call":
