@@ -1,6 +1,5 @@
 """FastMCP server for Fabric optimization tools."""
 
-import inspect
 import logging
 import re
 
@@ -58,47 +57,32 @@ def _build_tool_function(tool_def):
     required = set(schema.get("required", []))
     param_names = list(props.keys())
 
-    # Build the function signature dynamically using inspect.Parameter
-    params = []
-    for name in param_names:
-        if name in required:
-            params.append(inspect.Parameter(
-                name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str
-            ))
-        else:
-            params.append(inspect.Parameter(
-                name, inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=None, annotation=str
-            ))
-
-    sig = inspect.Signature(params, return_annotation=str)
-
-    def _execute(_tool=tool_def, **kwargs) -> str:
+    def _execute(**kwargs) -> str:
         try:
             _ensure_auth()
             require_auth()
             args = {k: v for k, v in kwargs.items() if v is not None}
             if "workspaceId" in args and not GUID_RE.match(str(args["workspaceId"])):
                 args["workspaceId"] = _resolve_workspace_id(str(args["workspaceId"]))
-            return _tool["handler"](args)
+            return tool_def["handler"](args)
         except Exception as e:
-            logging.error(f"Tool {_tool['name']} error: {e}")
+            logging.error(f"Tool {tool_def['name']} error: {e}")
             return f"Error: {str(e)}"
 
-    if not param_names:
-        # No-parameter tool
-        def wrapper() -> str:
-            return _execute()
-    else:
-        def wrapper(*args, **kwargs) -> str:
-            bound = sig.bind(*args, **kwargs)
-            bound.apply_defaults()
-            return _execute(**bound.arguments)
-        wrapper.__signature__ = sig
+    # Build a real function via exec with typed parameters
+    req_params = [f"{p}: str" for p in param_names if p in required]
+    opt_params = [f"{p}: str = ''" for p in param_names if p not in required]
+    all_params = ", ".join(req_params + opt_params)
+    pass_args = ", ".join(f"{p}={p}" for p in param_names)
 
-    wrapper.__name__ = tool_def["name"]
-    wrapper.__doc__ = tool_def["description"]
-    return wrapper
+    fn_name = tool_def["name"]
+    code = f"def {fn_name}({all_params}) -> str:\n    return _exec({pass_args})"
+    local_ns = {"_exec": _execute}
+    exec(code, local_ns)
+
+    fn = local_ns[fn_name]
+    fn.__doc__ = tool_def["description"]
+    return fn
 
 
 # Register all tools with FastMCP
