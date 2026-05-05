@@ -6,4 +6,3 @@ python-tds
 botbuilder-core
 botbuilder-integration-aiohttp
 azure-ai-projects
-fastmcp
