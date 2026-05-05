@@ -3,13 +3,7 @@ import os
 import re
 
 import azure.functions as func
-from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings
-from botbuilder.schema import Activity
 
-from auth.fabric_auth import init_server_auth, require_auth
-from tools import all_tools, AUTH_TOOL_NAMES
-from clients.fabric_client import list_workspaces
-from bot.teams_bot import FabricOptimizerBot
 from mcp_server import mcp
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -82,32 +76,48 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse('{"status":"ok"}', mimetype="application/json")
 
 
-# --- Teams Bot endpoint ---
-_bot_settings = BotFrameworkAdapterSettings(
-    app_id=os.environ.get("MicrosoftAppId", ""),
-    app_password=os.environ.get("MicrosoftAppPassword", ""),
-)
-_adapter = BotFrameworkAdapter(_bot_settings)
-_bot = FabricOptimizerBot()
+# --- Teams Bot endpoint (lazy imports for compatibility) ---
+_bot_adapter = None
+_bot_instance = None
+
+
+def _get_bot():
+    global _bot_adapter, _bot_instance
+    if _bot_adapter is None:
+        from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings
+        from bot.teams_bot import FabricOptimizerBot
+
+        _bot_adapter = BotFrameworkAdapter(BotFrameworkAdapterSettings(
+            app_id=os.environ.get("MicrosoftAppId", ""),
+            app_password=os.environ.get("MicrosoftAppPassword", ""),
+        ))
+        _bot_instance = FabricOptimizerBot()
+    return _bot_adapter, _bot_instance
 
 
 @app.route(route="messages", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 async def messages(req: func.HttpRequest) -> func.HttpResponse:
     """Teams bot messages endpoint."""
+    from botbuilder.schema import Activity
+
     if "application/json" not in (req.headers.get("Content-Type") or ""):
         return func.HttpResponse(status_code=415)
 
+    adapter, bot = _get_bot()
     body = req.get_json()
     activity = Activity().deserialize(body)
     auth_header = req.headers.get("Authorization", "")
 
     async def _turn_callback(turn_context):
-        await _bot.on_turn(turn_context)
+        await bot.on_turn(turn_context)
 
-    await _adapter.process_activity(activity, auth_header, _turn_callback)
+    await adapter.process_activity(activity, auth_header, _turn_callback)
     return func.HttpResponse(status_code=200)
 
 
-# --- Daily scan timer trigger ---
-from orchestration.daily_scan import register_daily_scan
-register_daily_scan(app)
+# --- Daily scan timer trigger (lazy import to avoid startup failures) ---
+try:
+    from orchestration.daily_scan import register_daily_scan
+    register_daily_scan(app)
+except ImportError as e:
+    logging.warning(f"Daily scan not registered (missing dep): {e}")
